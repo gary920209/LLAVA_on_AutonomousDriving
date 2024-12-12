@@ -1,3 +1,6 @@
+'''
+This script demonstrates how to estimate depth for an object within a bounding box using the Depth-Anything
+'''
 import os
 
 import numpy as np
@@ -7,6 +10,10 @@ import cv2
 from PIL import Image
 from datasets import load_dataset
 from transformers import pipeline
+
+pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-large-hf")
+dataset = load_dataset("ntudlcv/dlcv_2024_final1", split="test", streaming=True)
+output_dir = "b10901091/DLCV-Fall-2024-Final-1-cvpr2025/depth_output"
 
 def estimate_depth(item, bbox, pipe, output_dir, visualize=False):
     """
