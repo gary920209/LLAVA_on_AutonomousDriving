@@ -1,0 +1,4 @@
+checkpoints
+llava.egg-info/
+__pycache__/
+wandb/
