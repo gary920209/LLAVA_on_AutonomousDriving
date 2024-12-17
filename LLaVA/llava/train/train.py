@@ -56,10 +56,13 @@ class ModelArguments:
     version: Optional[str] = field(default="v0")
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=False)
+    tune_vision_encoder_adapter: bool = field(default=False)
+    mm_vision_input_dim: int = field(default=3)
     vision_tower: Optional[str] = field(default=None)
     mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
     mm_projector_type: Optional[str] = field(default='linear')
+    pretrain_vision_adapter: Optional[str] = field(default=None)
     mm_use_im_start_end: bool = field(default=False)
     mm_use_im_patch_token: bool = field(default=True)
     mm_patch_merge_type: Optional[str] = field(default='flat')
@@ -664,7 +667,7 @@ class HuggingfaceSupervisedDataset(Dataset):
         
         # Load dataset in streaming mode to prevent memory issues
         self.dataset = load_dataset(data_path)
-        self.train_data = self.dataset['train']
+        self.train_data = self.dataset['test']
         max_samples=0
         if max_samples > 0:  # Ensure max_samples is positive
             self.train_data = self.train_data.select(range(min(max_samples, len(self.train_data))))
@@ -1071,6 +1074,9 @@ def train(attn_implementation=None):
         vision_tower = model.get_vision_tower()
         vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
+        vision_adapter = model.get_vision_adapter()
+        vision_adapter.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+
         data_args.image_processor = vision_tower.image_processor
         data_args.is_multimodal = True
 
@@ -1117,6 +1123,17 @@ def train(attn_implementation=None):
                     tokenizer=tokenizer,
                     args=training_args,
                     **data_module)
+    
+    # print("[DEBUG] model: ", model)
+    print("[DEBUG] all trainable parameters: ")
+    sum = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print("[DEBUG] ", name, param.numel())
+            sum += param.numel()
+    print("[DEBUG] total trainable parameters: ", sum)
+    
+    print(model)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

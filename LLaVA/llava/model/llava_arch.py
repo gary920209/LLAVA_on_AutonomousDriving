@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from .multimodal_encoder.builder import build_vision_tower
-from .multimodal_projector.builder import build_vision_projector
+from .multimodal_projector.builder import build_vision_projector, build_vision_adapter
 
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
@@ -30,7 +30,6 @@ class LlavaMetaModel:
 
     def __init__(self, config):
         super(LlavaMetaModel, self).__init__(config)
-
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=True)
             self.mm_projector = build_vision_projector(config)
@@ -39,6 +38,10 @@ class LlavaMetaModel:
                 self.image_newline = nn.Parameter(
                     torch.empty(config.hidden_size, dtype=self.dtype)
                 )
+
+    def get_vision_adapter(self):
+        vision_adapter = getattr(self, 'vision_adapter', None)
+        return vision_adapter
 
     def get_vision_tower(self):
         vision_tower = getattr(self, 'vision_tower', None)
@@ -52,6 +55,20 @@ class LlavaMetaModel:
         mm_vision_select_feature = model_args.mm_vision_select_feature
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
         mm_patch_merge_type = model_args.mm_patch_merge_type
+        mm_vision_input_dimension = model_args.mm_vision_input_dim
+        pretrain_vision_adapter = model_args.pretrain_vision_adapter
+        
+        self.vision_adapter = build_vision_adapter(mm_vision_input_dimension)
+        for p in self.vision_adapter.parameters():
+            p.requires_grad = True
+
+        if pretrain_vision_adapter is not None:
+            mm_projector_weights = torch.load(pretrain_vision_adapter, map_location='cpu')
+            def get_w(weights, keyword):
+                return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
+
+            self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'vision_adapter'))
+
 
         self.config.mm_vision_tower = vision_tower
 
@@ -136,9 +153,14 @@ class LlavaMetaForCausalLM(ABC):
 
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
+    
+    def get_vision_adapter(self):
+        return self.get_model().get_vision_adapter()
 
     def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
+        image_features = self.get_model().vision_adapter(images)
+        image_features = nn.LayerNorm(image_features.shape[1:], device=image_features.device, dtype=image_features.dtype)(image_features)
+        image_features = self.get_model().get_vision_tower()(image_features)
         image_features = self.get_model().mm_projector(image_features)
         return image_features
 
