@@ -30,6 +30,27 @@ from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 class LlavaConfig(LlamaConfig):
     model_type = "llava_llama"
 
+    def __init__(self,
+                 bb_input_dim: int = 35,  # Default: N classes from YOLO
+                 bb_projector_output_dim: int = 768,  # Match CLIP embedding size
+                 bb_projector_type: str = "mlp2x_gelu",  # Projector type
+                 **kwargs):
+        """
+        Initialize LlavaConfig with additional parameters for bounding box encoder.
+
+        Args:
+            bb_encoder_input_dim (int): Input dimension for bounding box encoder.
+            bb_projector_output_dim (int): Output dimension for bounding box projector.
+            bb_projector_type (str): Projector type (e.g., 'linear', 'mlp2_gelu').
+        """
+        super().__init__(**kwargs)
+        self.bb_input_dim = bb_input_dim
+        self.bb_projector_output_dim = bb_projector_output_dim
+        self.bb_projector_type = bb_projector_type
+        mm_projector_type = kwargs.get("mm_projector_type", None)
+        if mm_projector_type is not None:
+            self.mm_projector_type = mm_projector_type
+
 
 class LlavaLlamaModel(LlavaMetaModel, LlamaModel):
     config_class = LlavaConfig
@@ -133,7 +154,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
-
         return super().generate(
             position_ids=position_ids,
             attention_mask=attention_mask,

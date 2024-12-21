@@ -6,7 +6,7 @@ import math
 import ast
 
 from transformers import StoppingCriteria
-from llava.constants import IMAGE_TOKEN_INDEX
+from llava.constants import BOUNDINGBOX_TOKEN_INDEX, IMAGE_TOKEN_INDEX
 
 
 def select_best_resolution(original_size, possible_resolutions):
