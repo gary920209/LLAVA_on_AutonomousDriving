@@ -79,6 +79,8 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default=None,
                            metadata={"help": "Path to the training data."})
+    val_data_path: str = field(default=None,
+                           metadata={"help": "Path to the validation data."})
     lazy_preprocess: bool = False
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default=None)
@@ -675,10 +677,14 @@ class HuggingfaceSupervisedDataset(Dataset):
         # Load dataset in streaming mode to prevent memory issues
         if data_path.startswith('/mnt/'):
             self.dataset = load_dataset('json', data_files=data_path)
+            # self.val_dataset = load_dataset('json', data_files=val_data_path)
         else:
             self.dataset = load_dataset(data_path)
-
+            # self.val_dataset = load_dataset(val_data_path)
+        
+        # print(self.val_dataset)
         self.train_data = self.dataset['train']
+        # self.val_data = self.val_dataset['train']
         max_samples=0
         if max_samples > 0:  # Ensure max_samples is positive
             self.train_data = self.train_data.select(range(min(max_samples, len(self.train_data))))
@@ -1044,6 +1050,11 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
             data_path=data_args.data_path,
             data_args=data_args
         )
+        val_dataset = HuggingfaceSupervisedDataset(
+            tokenizer=tokenizer,
+            data_path=data_args.val_data_path,
+            data_args=data_args
+        )
     else:
         train_dataset = LazySupervisedDataset(
             tokenizer=tokenizer,
@@ -1053,7 +1064,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
         
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset,
-                eval_dataset=None,
+                eval_dataset=val_dataset,
                 data_collator=data_collator)
 
 def train(attn_implementation=None):

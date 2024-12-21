@@ -716,6 +716,7 @@ class HuggingfaceSupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning using Huggingface datasets."""
 
     def __init__(self, data_path: str,
+             val_data_path: str,
              tokenizer: transformers.PreTrainedTokenizer,
              data_args: DataArguments):
         super(HuggingfaceSupervisedDataset, self).__init__()
@@ -723,10 +724,14 @@ class HuggingfaceSupervisedDataset(Dataset):
         # Load dataset in streaming mode to prevent memory issues
         if data_path.startswith('/mnt/'):
             self.dataset = load_dataset('json', data_files=data_path)
+            self.val_dataset = load_dataset('json', data_files=val_data_path)
         else:
             self.dataset = load_dataset(data_path)
+            self.val_dataset = load_dataset(val_data_path)
 
+        print(self.val_dataset)
         self.train_data = self.dataset['train']
+        self.val_data = self.val_dataset['train']
         max_samples=0
         if max_samples > 0:  # Ensure max_samples is positive
             self.train_data = self.train_data.select(range(min(max_samples, len(self.train_data))))
@@ -1027,6 +1032,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
         train_dataset = HuggingfaceSupervisedDataset(
             tokenizer=tokenizer,
             data_path=data_args.data_path,
+            val_data_path=data_args.val_data_path,
             data_args=data_args
         )
     else:
