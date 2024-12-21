@@ -1,7 +1,7 @@
 torch==2.0.1
 accelerate==0.26.0
 bitsandbytes==0.41.0
-deepspeed==0.9.5
+deepspeed==0.12.6
 einops-exts==0.0.4
 einops==0.6.1
 gradio==3.35.2

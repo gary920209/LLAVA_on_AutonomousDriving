@@ -19,7 +19,8 @@ import torch
 import torch.nn as nn
 
 from .multimodal_encoder.builder import build_vision_tower
-from .multimodal_projector.builder import build_vision_projector, build_vision_adapter
+from .multimodal_projector.builder import build_vision_projector
+from .boundingbox_encoder.builder import build_bbox_tower
 
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
@@ -38,10 +39,12 @@ class LlavaMetaModel:
                 self.image_newline = nn.Parameter(
                     torch.empty(config.hidden_size, dtype=self.dtype)
                 )
+            
+            self.bbox_tower = build_bbox_tower(config)
 
-    def get_vision_adapter(self):
-        vision_adapter = getattr(self, 'vision_adapter', None)
-        return vision_adapter
+    def get_bbox_tower(self):
+        bbox_tower = getattr(self, 'bbox_tower', None)
+        return bbox_tower
 
     def get_vision_tower(self):
         vision_tower = getattr(self, 'vision_tower', None)
@@ -55,20 +58,6 @@ class LlavaMetaModel:
         mm_vision_select_feature = model_args.mm_vision_select_feature
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
         mm_patch_merge_type = model_args.mm_patch_merge_type
-        mm_vision_input_dimension = model_args.mm_vision_input_dim
-        pretrain_vision_adapter = model_args.pretrain_vision_adapter
-        
-        self.vision_adapter = build_vision_adapter(mm_vision_input_dimension)
-        for p in self.vision_adapter.parameters():
-            p.requires_grad = True
-
-        if pretrain_vision_adapter is not None:
-            mm_projector_weights = torch.load(pretrain_vision_adapter, map_location='cpu')
-            def get_w(weights, keyword):
-                return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
-
-            self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'vision_adapter'))
-
 
         self.config.mm_vision_tower = vision_tower
 
@@ -154,20 +143,50 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
     
-    def get_vision_adapter(self):
-        return self.get_model().get_vision_adapter()
+    def get_bbox_tower(self):
+        return self.get_model().get_bbox_tower()
 
     def encode_images(self, images):
-        image_features = self.get_model().vision_adapter(images)
-        image_features = nn.LayerNorm(image_features.shape[1:], device=image_features.device, dtype=image_features.dtype)(image_features)
-        image_features = self.get_model().get_vision_tower()(image_features)
-        image_features = self.get_model().mm_projector(image_features)
+        # images should be in shape of (B, C, H, W)
+        # check if C is 3  
+        assert images.shape[1] >= 3, "Image should have at least 3 channels"
+
+        # encode RGB images
+        RGB_images = images[:, :3]
+        RGB_image_features = self.get_model().get_vision_tower()(RGB_images)
+        RGB_image_features = self.get_model().mm_projector(RGB_image_features) # (B, output_dim)
+        print("RGB_image_features:", RGB_image_features.shape)
+
+        # encode Bounding Box images
+        if images.shape[1] > 3:
+            assert self.get_model().get_bbox_tower() is not None and images.shape[1] == 3 + self.get_model().get_bbox_tower().input_channels
+            bbox_images = images[:, 3:, :, :]
+            bbox_image_features = self.get_model().get_bbox_tower()(bbox_images) # (B, output_dim)
+            print("BBOX_image_features:",bbox_image_features.shape)
+            image_features = torch.cat((RGB_image_features, bbox_image_features), dim=1)
+        else:
+            image_features = RGB_image_features
+        print(f"TOTAL_image_features:", image_features.shape)
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
         images, image_sizes=None
     ):
+        # TESTING
+        # for name, param in self.get_bbox_tower().named_parameters():
+        #     if param.grad is not None:
+        #         print(f"Gradient for {name} is flowing back")
+        #     else:
+        #         print(f"Gradient for {name} is not flowing back")
+
+        # # TESTING
+        # for name, param in self.get_model().mm_projector.named_parameters():
+        #     if param.grad is not None:
+        #         print(f"Gradient for {name} is flowing back")
+        #     else:
+        #         print(f"Gradient for {name} is not flowing back")
+
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels

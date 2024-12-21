@@ -49,10 +49,3 @@ def build_vision_projector(config, delay_load=False, **kwargs):
         return IdentityMap()
 
     raise ValueError(f'Unknown projector type: {projector_type}')
-
-def build_vision_adapter(input_dim):
-    # from (b, input_dim, ?, ?) to (b, 3, ?, ?)
-    print(f'Building vision adapter with input_dim={input_dim}')
-    adapter = nn.Conv2d(input_dim, 3, kernel_size=1, stride=1, padding=0, bias=False)
-    
-    return adapter

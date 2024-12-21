@@ -23,9 +23,7 @@ import pathlib
 import random
 from typing import Dict, Optional, Sequence, List
 from datasets import load_dataset
-from matplotlib import pyplot as plt
 import numpy as np
-from scipy.ndimage import zoom
 import torch
 from tqdm import tqdm
 import transformers
@@ -60,14 +58,12 @@ class ModelArguments:
     version: Optional[str] = field(default="v0")
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=False)
-    tune_bbox_encoder: bool = field(default=False)
+    # tune_vision_encoder_adapter: bool = field(default=False)
     # mm_vision_input_dim: int = field(default=3)
     vision_tower: Optional[str] = field(default=None)
     mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
     mm_projector_type: Optional[str] = field(default='linear')
-    bb_projector_type: Optional[str] = field(default='linear')
-    bb_input_dim: int = field(default=35)
     pretrain_vision_adapter: Optional[str] = field(default=None)
     mm_use_im_start_end: bool = field(default=False)
     mm_use_im_patch_token: bool = field(default=True)
@@ -118,7 +114,6 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_weight_path: str = ""
     lora_bias: str = "none"
     mm_projector_lr: Optional[float] = None
-    bb_encoder_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
 
 
@@ -179,7 +174,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
 def find_all_linear_names(model):
     cls = torch.nn.Linear
     lora_module_names = set()
-    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'bbox_tower']
+    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler']
     for name, module in model.named_modules():
         if any(mm_keyword in name for mm_keyword in multimodal_keywords):
             continue
@@ -201,7 +196,6 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         keys_to_match = ['mm_projector']
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(['embed_tokens', 'embed_in'])
-
         weight_to_save = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
         trainer.model.config.save_pretrained(output_dir)
 
@@ -259,28 +253,46 @@ def smart_tokenizer_and_embedding_resize(
 def _tokenize_fn(strings: Sequence[str],
                  tokenizer: transformers.PreTrainedTokenizer) -> Dict:
     """Tokenize a list of strings."""
-    tokenized_list = [
-        tokenizer(
-            text,
-            return_tensors="pt",
-            padding="longest",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        ) for text in strings
-    ]
-    input_ids = labels = [
-        tokenized.input_ids[0] for tokenized in tokenized_list
-    ]
-    input_ids_lens = labels_lens = [
-        tokenized.input_ids.ne(tokenizer.pad_token_id).sum().item()
-        for tokenized in tokenized_list
-    ]
+    tokenized = tokenizer(
+        strings,
+        return_tensors="pt",
+        padding="longest",
+        max_length=tokenizer.model_max_length,
+        truncation=True
+    )
+
+    input_ids = tokenized.input_ids
+    labels = input_ids.clone()
+    input_ids_lens = tokenized.input_ids.ne(tokenizer.pad_token_id).sum(dim=1).tolist()
+
     return dict(
         input_ids=input_ids,
         labels=labels,
         input_ids_lens=input_ids_lens,
-        labels_lens=labels_lens,
+        labels_lens=input_ids_lens,
     )
+    # tokenized_list = [
+    #     tokenizer(
+    #         text,
+    #         return_tensors="pt",
+    #         padding="longest",
+    #         max_length=tokenizer.model_max_length,
+    #         truncation=True,
+    #     ) for text in strings
+    # ]
+    # input_ids = labels = [
+    #     tokenized.input_ids[0] for tokenized in tokenized_list
+    # ]
+    # input_ids_lens = labels_lens = [
+    #     tokenized.input_ids.ne(tokenizer.pad_token_id).sum().item()
+    #     for tokenized in tokenized_list
+    # ]
+    # return dict(
+    #     input_ids=input_ids,
+    #     labels=labels,
+    #     input_ids_lens=input_ids_lens,
+    #     labels_lens=labels_lens,
+    # )
 
 
 def _mask_targets(target, tokenized_lens, speakers):
@@ -314,17 +326,40 @@ def _add_speaker_and_signal(header, source, get_conversation=True):
     conversation += BEGIN_SIGNAL
     return conversation
 
+def _extract_bounding_box_info(data):
+        sentences = []
+        for obj in data:
+            bbox_n = obj["bbox_n"]
+            left_up_x = bbox_n[0]
+            left_up_y = bbox_n[1]
+            right_down_x = bbox_n[2]
+            right_down_y = bbox_n[3]
+            depth_value = obj["depth_value"]
+            object_unique_name = obj["object_unique_name"]
+
+            sentence = (
+                f"Object '{object_unique_name}' has bounding box from ({left_up_x:.6f}, {left_up_y:.6f}) "
+                f"to ({right_down_x:.6f}, {right_down_y:.6f}), with a depth value of {depth_value:.6f}."
+            )
+            sentences.append(sentence)
+
+        return " ".join(sentences)
+
 
 def preprocess_multimodal(
     sources: Sequence[str],
     data_args: DataArguments
 ) -> Dict:
     is_multimodal = data_args.is_multimodal
-    if not is_multimodal:
-        return sources
+    
+    sources_copy = copy.deepcopy(sources[0])
+    conversations = sources_copy['conversations']
 
-    for source in sources:
-        for sentence in source:
+    if not is_multimodal:
+        return sources_copy
+
+    for conversation in conversations:
+        for sentence in conversation:
             if DEFAULT_IMAGE_TOKEN in sentence['value']:
                 sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '').strip()
                 sentence['value'] = DEFAULT_IMAGE_TOKEN + '\n' + sentence['value']
@@ -336,7 +371,7 @@ def preprocess_multimodal(
                 replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
             sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
 
-    return sources
+    return sources_copy
 
 
 def preprocess_llama_2(
@@ -431,7 +466,7 @@ def preprocess_v1(
 
     # Apply prompt templates
     conversations = []
-    for i, source in enumerate(sources):
+    for i, source in enumerate(sources['conversations']):
         if roles[source[0]["from"]] != conv.roles[0]:
             # Skip the first one if it is not from human
             source = source[1:]
@@ -444,9 +479,21 @@ def preprocess_v1(
         conversations.append(conv.get_prompt())
 
     # Tokenize conversations
-
     if has_image:
+        ##### TODOS: add bounding boxes and depth information after conversations #####
+        # conversations_copy = copy.deepcopy(conversations)
+        # full_conversations = [conversations_copy[0].replace('<image>\n', '<image>\n' + '<bounding_box>' + '\n')]
+        # full_conversations = [conversations_copy[0].replace('<image>\n', '<image>\n' + _extract_bounding_box_info(sources['bounding_box']) + '\n')]
+        # print('bbox:', _extract_bounding_box_info(sources['bounding_box']))
+        # print('fullcc', full_conversations)
         input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
+        # conversations = full_conversations
+        # additional_info_tokenized = _tokenize_fn(DEFAULT_IMAGE_TOKEN + '\n' + _extract_bounding_box_info(sources['bounding_box']), tokenizer)
+        # # print("add:", len(additional_info_tokenized["input_ids"][0]))
+        # additional_info_tensor = torch.tensor(additional_info_tokenized["input_ids"], dtype=input_ids.dtype)
+        # # print("add:", np.array(additional_info_tokenized["input_ids"]).shape)
+        # input_ids = torch.cat((additional_info_tensor, input_ids), dim=1)
+        # print('input ids:', np.array(input_ids).shape)
     else:
         input_ids = tokenizer(
             conversations,
@@ -634,6 +681,7 @@ def preprocess(
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version.startswith("v1"):
+        # print('has_image', has_image)
         return preprocess_v1(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version == "mpt":
         return preprocess_mpt(sources, tokenizer, has_image=has_image)
@@ -748,16 +796,8 @@ class HuggingfaceSupervisedDataset(Dataset):
     #         length_list.append(cur_len)
     #     return length_list
     
-    def visualize_bbox_map(self, additional_info, path):
-        for i in range(np.array(additional_info).shape[-1]):
-            if not np.array_equal(additional_info[..., i], np.zeros_like(additional_info[..., i])):
-                plt.imshow(additional_info[..., i], cmap='viridis')
-                plt.colorbar()
-                plt.savefig(f'llava/train/visualize_images/{path}')
-                plt.close()
-    
-    def generate_bbox_map(self ,pil_img, bboxes, categories = CLASSES):
-        w, h = pil_img.size
+    def generate_bbox_map(image, bboxes, categories = CLASSES):
+        h, w, _ = np.array(image).shape
         num_categories = len(categories)
         bbox_map = np.zeros((h, w, num_categories), dtype=np.uint8)
         
@@ -767,7 +807,7 @@ class HuggingfaceSupervisedDataset(Dataset):
             bbox = bbox_dict['bbox']
             category_name = bbox_dict['category_name']
 
-            if category_name not in categories:
+            if category_name not in category_to_idx:
                 continue
 
             # Get the corresponding channel index for the category
@@ -792,6 +832,7 @@ class HuggingfaceSupervisedDataset(Dataset):
             sources = [item]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"
         # rank0_print(sources[0])
+        # print('getitem sources:', sources)
         if 'image' in sources[0]:
             # For Huggingface datasets, the image is already loaded
             image = sources[0]['image']
@@ -812,81 +853,24 @@ class HuggingfaceSupervisedDataset(Dataset):
                         result = Image.new(pil_img.mode, (height, height), background_color)
                         result.paste(pil_img, ((height - width) // 2, 0))
                         return result
-                def expand2square_np(img_np):
-                    # Get the height, width, and number of channels of the input image
-                    h, w, c = img_np.shape
-                    
-                    # Calculate the new square size
-                    square_size = max(h, w)
-                    
-                    # Create a new square image with the same number of channels, filled with background color for the first 3 channels
-                    expanded_img = np.zeros((square_size, square_size, c))
-
-                    # Place the original image in the center of the new square image
-                    y_offset = (square_size - h) // 2
-                    x_offset = (square_size - w) // 2
-
-                    expanded_img[y_offset:y_offset+h, x_offset:x_offset+w, :] = img_np
-                    
-                    return expanded_img
-                def preprocess_additional_info(additional_data, size=336, do_resize=True, crop_size=336):
-                    h, w, c = additional_data.shape
-                    resized_additional_data = np.zeros((size, size, c))
-                    # Resize the additional data
-                    if do_resize:
-                        scaling_factor = (size / h, size / w)
-                        for i in range(c):
-                            resized_additional_data[:, :, i] = zoom(additional_data[:, :, i], scaling_factor)
-
-                    # Center crop the additional data (if needed)
-                    if crop_size:
-                        top = (size - crop_size) // 2
-                        left = (size - crop_size) // 2
-                        resized_additional_data = resized_additional_data[top:top+crop_size, left:left+crop_size, :]
-
-                    return resized_additional_data
-
+                # bbox = [{'bbox': entry['bbox']} for entry in sources[0]['bounding_box']]
                 bbox_map = self.generate_bbox_map(image, sources[0]['bounding_box'])
-                # print('bbox_map shape:', np.array(bbox_map.shape)) # [720 1280 34] 
+                print(bbox_map)
                 depth_map = np.load(sources[0]["depth_npy"])
-                depth_map = np.expand_dims(depth_map, axis=2)
-                # print('depth shape:', depth_map.shape) # (720, 1280, 1)
-                additional_info = np.concatenate((bbox_map, depth_map), axis=2)
-                # self.visualize_bbox_map(additional_info, path=f"{sources[0]["id"]}_slice_{i}.png")
-                additional_info = expand2square_np(additional_info)
-                # self.visualize_bbox_map(additional_info, path=f"{sources[0]["id"]}_expanded_{i}.png")
-                additional_info = preprocess_additional_info(additional_info)
-                # self.visualize_bbox_map(additional_info, path=f"{sources[0]["id"]}_transform_{i}.png")
+                image = torch.cat((image, bbox_map, depth_map), dim=2)
+                print('image shape: ', np.array(image).shape)
                 image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
-                # print('preprocess img: ', type(image), np.array(image).shape) # (1280, 1280, 38)
                 image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-                # print('final image size:', type(image), np.array(image).shape) # (3, 336, 336)
-                image_transposed_uint8 = (np.transpose(np.array(image), (1, 2, 0)))
-                min_val = image_transposed_uint8.min()
-                max_val = image_transposed_uint8.max()
-                normalized_image = (image_transposed_uint8 - min_val) / (max_val - min_val)
-                # print('original image:', normalized_image)
-                # plt.imshow(normalized_image, cmap='viridis')
-                # plt.colorbar()
-                # plt.savefig(f'llava/train/visualize_images/{sources[0]["id"]}_original_image.png', bbox_inches='tight')
-                # plt.close()
-                additional_info = np.transpose(additional_info, (2, 0, 1))
-                # print('transform:', additional_info.shape)
-                image = torch.cat([image, torch.from_numpy(additional_info)], dim=0)
-                # print('final image shape:', np.array(image).shape)
             else:
                 image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            
+
             updated_sources = []
             for source in sources:
                 updated_source = copy.deepcopy(source)
-                if isinstance(source['conversations'][0], dict):
-                    updated_source['conversations'] = source['conversations']
-                else:
-                    updated_source['conversations'] = random.sample(source['conversations'], 1)
+                updated_source['conversations'] = random.sample(source['conversations'], 1)
                 updated_sources.append(updated_source)
             sources = preprocess_multimodal(
-                copy.deepcopy([e["conversations"] for e in updated_sources]),
+                updated_sources,
                 self.data_args)
         else:
             sources = copy.deepcopy([e["conversations"] for e in sources])
@@ -904,7 +888,8 @@ class HuggingfaceSupervisedDataset(Dataset):
             data_dict['image'] = image
         elif self.data_args.is_multimodal:
             crop_size = self.data_args.image_processor.crop_size
-            data_dict['image'] = image
+            data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+        # print('data_dict:', data_dict)
         return data_dict
 # class LazySupervisedDataset(Dataset):
 #     """Dataset for supervised fine-tuning."""
@@ -1063,7 +1048,6 @@ def train(attn_implementation=None):
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
-    print(f"[DEBUG] Local Rank: {local_rank}")
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
     bnb_model_from_pretrained_args = {}
@@ -1101,10 +1085,7 @@ def train(attn_implementation=None):
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
                 torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
-                bb_projector_type=model_args.bb_projector_type,
-                mm_projector_type=model_args.mm_projector_type,
-                bb_input_dim=model_args.bb_input_dim,
-                **bnb_model_from_pretrained_args,
+                **bnb_model_from_pretrained_args
             )
     else:
         model = transformers.LlamaForCausalLM.from_pretrained(
@@ -1191,7 +1172,6 @@ def train(attn_implementation=None):
         vision_tower = model.get_vision_tower()
         vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
-
         data_args.image_processor = vision_tower.image_processor
         data_args.is_multimodal = True
 
@@ -1201,7 +1181,6 @@ def train(attn_implementation=None):
 
         model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
         if model_args.tune_mm_mlp_adapter:
-            # print("in")
             model.requires_grad_(False)
             for p in model.get_model().mm_projector.parameters():
                 p.requires_grad = True
@@ -1214,15 +1193,8 @@ def train(attn_implementation=None):
         if training_args.bits in [4, 8]:
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
 
-        bbox_tower = model.get_bbox_tower()
-        bbox_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
-        if model_args.tune_bbox_encoder:
-            for p in bbox_tower.parameters():
-                p.requires_grad = True
-
         model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_projector_lr = training_args.mm_projector_lr
-        model.config.bb_encoder_lr = training_args.bb_encoder_lr
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
@@ -1246,9 +1218,19 @@ def train(attn_implementation=None):
                     tokenizer=tokenizer,
                     args=training_args,
                     **data_module)
-    # print(trainer.optimizer)
     
     # print("[DEBUG] model: ", model)
+    print("[DEBUG] all trainable parameters: ")
+    sum = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print("[DEBUG] ", name, param.numel())
+            sum += param.numel()
+    print("[DEBUG] total trainable parameters: ", sum)
+    
+    # print(model)
+    
+    os.system(f"nvidia-smi")
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
