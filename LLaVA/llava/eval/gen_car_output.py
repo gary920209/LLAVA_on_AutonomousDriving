@@ -1,8 +1,22 @@
 import os
 import json
 import argparse
+import copy
+
+import matplotlib.pyplot as plt
 import torch
 from tqdm import trange
+from PIL import Image
+import requests
+from io import BytesIO
+import re
+import numpy as np
+import transformers
+from datasets import load_dataset
+from PIL import Image
+import random
+from typing import Dict
+from scipy.ndimage import zoom
 
 from llava.constants import (
     IMAGE_TOKEN_INDEX,
@@ -19,13 +33,145 @@ from llava.mm_utils import (
     tokenizer_image_token,
     get_model_name_from_path,
 )
+from llava.constants import CLASSES, IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
-from PIL import Image
+def load_and_process_dataset(data_path: str, tokenizer: transformers.PreTrainedTokenizer, data_args):
+    if data_path.startswith('/mnt/'):
+        dataset = load_dataset('json', data_files=data_path)
+    else:
+        dataset = load_dataset(data_path)
+    
+    train_data = dataset['train']
+    max_samples = 0
+    if max_samples > 0:
+        train_data = train_data.select(range(min(max_samples, len(train_data))))
+    
+    return train_data, tokenizer, data_args
 
-import requests
-from PIL import Image
-from io import BytesIO
-import re
+def get_lengths(train_data):
+    length_list = []
+    for sample in train_data:
+        img_tokens = 128 if 'image' in sample else 0
+        length_list.append(sum(len(conv['value'].split()) for conv in sample['conversations']) + img_tokens)
+    return length_list
+
+def visualize_bbox_map(additional_info, path):
+    for i in range(np.array(additional_info).shape[-1]):
+        if not np.array_equal(additional_info[..., i], np.zeros_like(additional_info[..., i])):
+            plt.imshow(additional_info[..., i], cmap='viridis')
+            plt.colorbar()
+            plt.savefig(f'llava/train/visualize_images/{path}')
+            plt.close()
+
+def generate_bbox_map(pil_img, bboxes, categories):
+    w, h = pil_img.size
+    num_categories = len(categories)
+    bbox_map = np.zeros((h, w, num_categories), dtype=np.uint8)
+    
+    category_to_idx = {category: idx for idx, category in enumerate(categories)}
+
+    for bbox_dict in bboxes:
+        bbox = bbox_dict['bbox']
+        category_name = bbox_dict['category_name']
+
+        if category_name not in categories:
+            continue
+
+        channel_idx = category_to_idx[category_name]
+        x_min, y_min, x_max, y_max = map(round, bbox)
+        x_min, x_max = np.clip([x_min, x_max], 0, w - 1)
+        y_min, y_max = np.clip([y_min, y_max], 0, h - 1)
+        bbox_map[y_min:y_max+1, x_min:x_max+1, channel_idx] = 1
+
+    return bbox_map
+
+def preprocess_image(image, processor, sources):
+    assert len(image) == 1
+    image = image[0]
+    if not isinstance(image, Image.Image):
+        image = Image.open(image).convert('RGB')
+
+    bbox_map = generate_bbox_map(image, sources['bounding_box'])
+    depth_map = np.load(sources["depth_npy"])
+    depth_map = np.expand_dims(depth_map, axis=2)
+    additional_info = np.concatenate((bbox_map, depth_map), axis=2)
+    additional_info = expand2square_np(additional_info)
+    additional_info = preprocess_additional_info(additional_info)
+    image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
+    image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+    print("image shape:", image.shape)
+    # print("image size:", image.size())
+    additional_info = np.transpose(additional_info, (2, 0, 1))
+    image = torch.cat([image, torch.from_numpy(additional_info)], dim=0).unsqueeze(0)
+
+    print(image.shape)
+    
+    return image
+    
+def expand2square(pil_img, background_color):
+    width, height = pil_img.size
+    if width == height:
+        return pil_img
+    elif width > height:
+        result = Image.new(pil_img.mode, (width, width), background_color)
+        result.paste(pil_img, (0, (width - height) // 2))
+        return result
+    else:
+        result = Image.new(pil_img.mode, (height, height), background_color)
+        result.paste(pil_img, ((height - width) // 2, 0))
+        return result
+
+def expand2square_np(img_np):
+    h, w, c = img_np.shape
+    square_size = max(h, w)
+    expanded_img = np.zeros((square_size, square_size, c))
+    y_offset = (square_size - h) // 2
+    x_offset = (square_size - w) // 2
+    expanded_img[y_offset:y_offset+h, x_offset:x_offset+w, :] = img_np
+    return expanded_img
+
+def preprocess_additional_info(additional_data, size=336, do_resize=True, crop_size=336):
+    h, w, c = additional_data.shape
+    resized_additional_data = np.zeros((size, size, c))
+    if do_resize:
+        scaling_factor = (size / h, size / w)
+        for i in range(c):
+            resized_additional_data[:, :, i] = zoom(additional_data[:, :, i], scaling_factor)
+    if crop_size:
+        top = (size - crop_size) // 2
+        left = (size - crop_size) // 2
+        resized_additional_data = resized_additional_data[top:top+crop_size, left:left+crop_size, :]
+    return resized_additional_data
+
+
+
+def generate_bbox_map(pil_img, bboxes, categories = CLASSES):
+    w, h = pil_img.size
+    num_categories = len(categories)
+    bbox_map = np.zeros((h, w, num_categories), dtype=np.uint8)
+    
+    category_to_idx = {category: idx for idx, category in enumerate(categories)}
+
+    for bbox_dict in bboxes:
+        bbox = bbox_dict['bbox']
+        category_name = bbox_dict['category_name']
+
+        if category_name not in categories:
+            continue
+
+        # Get the corresponding channel index for the category
+        channel_idx = category_to_idx[category_name]
+
+        # Convert bbox to integers and ensure they are within bounds
+        x_min, y_min, x_max, y_max = map(round, bbox)
+        x_min, x_max = np.clip([x_min, x_max], 0, w - 1)
+        y_min, y_max = np.clip([y_min, y_max], 0, h - 1)
+
+        # Set the pixels in the bbox to 1 for the corresponding channel
+        bbox_map[y_min:y_max+1, x_min:x_max+1, channel_idx] = 1
+
+    return bbox_map
+
 
 def image_parser(args):
     out = args.image_file.split(args.sep)
@@ -49,6 +195,9 @@ def load_images(image_files):
 
 def eval_model(args):
 
+    annotations = None
+    with open(args.annotation_file, "r") as f:
+        annotations = json.load(f)
     # Model
     disable_torch_init()
 
@@ -58,9 +207,9 @@ def eval_model(args):
     )
     
     qs_dict = {
-        "general": "You are an autonomous driving perception expert specializing in comprehensive scene analysis.",
-        "suggestion": "You are an autonomous driving expert specializing in providing safe driving recommendations.",
-        "regional": "You are an autonomous driving agent that can capture details of specific objects in the red boxes."
+        "general": "There is an image of traffic captured from the perspective of the ego car. Focus on objects influencing the ego car's driving behavior: vehicles (cars, trucks, buses, etc.), vulnerable road users (pedestrians, cyclists, motorcyclists), traffic signs (no parking, warning, directional, etc.), traffic lights (red, green, yellow), traffic cones, barriers, miscellaneous(debris, dustbin, animals, etc.). You must not discuss any objects beyond the seven categories above. Please describe each object's appearance, position, direction, and explain why it affects the ego car's behavior.",
+        "suggestion": "There is an image of traffic captured from the perspective of the ego car. Focus on objects influencing the ego car's driving behavior: vehicles (cars, trucks, buses, etc.), vulnerable road users (pedestrians, cyclists, motorcyclists), traffic signs (no parking, warning, directional, etc.), traffic lights (red, green, yellow), traffic cones, barriers, miscellaneous(debris, dustbin, animals, etc.). You must not discuss any objects beyond the seven categories above. Please provide driving suggestions for the ego car based on the current scene.",
+        "regional": "Please describe the object inside the red rectangle in the image and explain why it affect ego car driving."
     }
     for k, qs in qs_dict.items():
         image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
@@ -106,39 +255,40 @@ def eval_model(args):
         qs_dict[k] = prompt
 
     all_outputs = {}
-    for image_idx in trange(300):
-        for task_type in ["general", "regional", "suggestion"]:
-            print("task_type", task_type)
-            image_file = f"{args.image_folder}/Test_{task_type}_{image_idx}.png"
-            assert os.path.exists(image_file), f"Image file {image_file} does not exist."
-            image = [load_image(image_file)]
-            image_size = [image[0].size]
-            image_tensor = process_images(
-                image,
-                image_processor,
-                model.config
-            ).to(model.device, dtype=torch.float16)
-            input_ids = (
-                tokenizer_image_token(qs_dict[task_type], tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-                .unsqueeze(0)
-                .cuda()
+    for annotation in annotations:
+        task_type = annotation["id"].split("_")[1]
+        print("task_type", task_type)
+        image_file = annotation["image"]
+        assert os.path.exists(image_file), f"Image file {image_file} does not exist."
+        image = [load_image(image_file)]
+        print("image_file:", image_file)
+        image_size = [image[0].size]
+        image_tensor = preprocess_image(
+            image,
+            image_processor,
+            annotation
+        ).to(model.device, dtype=torch.float16)
+        input_ids = (
+            tokenizer_image_token(qs_dict[task_type], tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+            .unsqueeze(0)
+            .cuda()
+        )
+        with torch.inference_mode():
+            output_ids = model.generate(
+                input_ids,
+                images=image_tensor,
+                image_sizes=image_size,
+                do_sample=True if args.temperature > 0 else False,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                num_beams=args.num_beams,
+                max_new_tokens=args.max_new_tokens,
+                use_cache=True,
             )
-            with torch.inference_mode():
-                output_ids = model.generate(
-                    input_ids,
-                    images=image_tensor,
-                    image_sizes=image_size,
-                    do_sample=True if args.temperature > 0 else False,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                    num_beams=args.num_beams,
-                    max_new_tokens=args.max_new_tokens,
-                    use_cache=True,
-                )
 
-            outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
-            all_outputs[image_file.split('/')[-1].split('.')[0]] = outputs
-            print(outputs)
+        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        all_outputs[image_file.split('/')[-1].split('.')[0]] = outputs
+        print(outputs)
 
     with open(args.output_file, "w") as f:
         json.dump(all_outputs, f, indent=4)
@@ -155,6 +305,7 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=512)
-    parser.add_argument("--output_file", type=str, default="output.json")
+    parser.add_argument("--output_file", type=str, default="submission.json")
+    parser.add_argument("--annotation_file", type=str, default="/mnt/HDD_1/walker/dlcv_json_files/test.json")
     args = parser.parse_args()
     eval_model(args)

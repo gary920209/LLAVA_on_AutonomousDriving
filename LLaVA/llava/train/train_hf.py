@@ -59,6 +59,8 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default='ntudlcv/dlcv_2024_final1',
                           metadata={"help": "Path to the training data."})
+    val_data_path: str = field(default='ntudlcv/dlcv_2024_final1',
+                          metadata={"help": "Path to the validation data."})
     is_multimodal: bool = False
     image_aspect_ratio: str = 'square'
     model_max_length: int = field(
@@ -241,6 +243,7 @@ def make_supervised_data_module(processor: AutoProcessor,
     """Make dataset and collator for supervised fine-tuning."""
     train_dataset = HuggingfaceSupervisedDataset(
         data_path=data_args.data_path,
+        val_data_path=data_args.val_data_path,
         processor=processor,
         data_args=data_args
     )

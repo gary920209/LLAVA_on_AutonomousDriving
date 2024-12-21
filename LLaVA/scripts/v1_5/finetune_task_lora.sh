@@ -9,6 +9,7 @@ deepspeed llava/train/train_mem.py \
     --model_name_or_path liuhaotian/llava-v1.5-7b \
     --version v1 \
     --data_path /mnt/HDD_1/walker/dlcv_json_files/train.json \
+    --val_data_path /mnt/HDD_1/walker/dlcv_val_data/val_data.json \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --mm_projector_type mlp2x_gelu \
     --bb_projector_type mlp2x_gelu \
