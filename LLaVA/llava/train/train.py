@@ -16,6 +16,8 @@
 
 import os
 import copy
+import cv2
+
 from dataclasses import dataclass, field
 import json
 import logging
@@ -25,7 +27,7 @@ from typing import Dict, Optional, Sequence, List
 from datasets import load_dataset
 from matplotlib import pyplot as plt
 import numpy as np
-from scipy.ndimage import zoom
+# from scipy.ndimage import zoom
 import torch
 from tqdm import tqdm
 import transformers
@@ -446,7 +448,6 @@ def preprocess_v1(
         conversations.append(conv.get_prompt())
 
     # Tokenize conversations
-
     if has_image:
         input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
     else:
@@ -675,7 +676,7 @@ class HuggingfaceSupervisedDataset(Dataset):
         super(HuggingfaceSupervisedDataset, self).__init__()
         
         # Load dataset in streaming mode to prevent memory issues
-        if data_path.startswith('/mnt/'):
+        if data_path.startswith('/mnt/') or data_path.startswith('/home/'):
             self.dataset = load_dataset('json', data_files=data_path)
             # self.val_dataset = load_dataset('json', data_files=val_data_path)
         else:
@@ -842,7 +843,8 @@ class HuggingfaceSupervisedDataset(Dataset):
                     if do_resize:
                         scaling_factor = (size / h, size / w)
                         for i in range(c):
-                            resized_additional_data[:, :, i] = zoom(additional_data[:, :, i], scaling_factor)
+                            resized_additional_data = cv2.resize(additional_data, (size, size), interpolation=cv2.INTER_NEAREST)
+                            # resized_additional_data[:, :, i] = zoom(additional_data[:, :, i], scaling_factor)
 
                     # Center crop the additional data (if needed)
                     if crop_size:
@@ -867,17 +869,17 @@ class HuggingfaceSupervisedDataset(Dataset):
                 # print('preprocess img: ', type(image), np.array(image).shape) # (1280, 1280, 38)
                 image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
                 # print('final image size:', type(image), np.array(image).shape) # (3, 336, 336)
-                image_transposed_uint8 = (np.transpose(np.array(image), (1, 2, 0)))
-                min_val = image_transposed_uint8.min()
-                max_val = image_transposed_uint8.max()
-                normalized_image = (image_transposed_uint8 - min_val) / (max_val - min_val)
+                # image_transposed_uint8 = (np.transpose(np.array(image), (1, 2, 0)))
+                # min_val = image_transposed_uint8.min()
+                # max_val = image_transposed_uint8.max()
+                # normalized_image = (image_transposed_uint8 - min_val) / (max_val - min_val)
                 # print('original image:', normalized_image)
                 # plt.imshow(normalized_image, cmap='viridis')
                 # plt.colorbar()
                 # plt.savefig(f'llava/train/visualize_images/{sources[0]["id"]}_original_image.png', bbox_inches='tight')
                 # plt.close()
                 additional_info = np.transpose(additional_info, (2, 0, 1))
-                # print('transform:', additional_info.shape)
+                # # print('transform:', additional_info.shape)
                 image = torch.cat([image, torch.from_numpy(additional_info)], dim=0)
                 # print('final image shape:', np.array(image).shape)
             else:
@@ -896,11 +898,10 @@ class HuggingfaceSupervisedDataset(Dataset):
                 self.data_args)
         else:
             sources = copy.deepcopy([e["conversations"] for e in sources])
-
         data_dict = preprocess(
             sources,
             self.tokenizer,
-            has_image=('image' in sources))
+            has_image=('image' in sources or self.data_args.is_multimodal))
             
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
@@ -1026,7 +1027,6 @@ class DataCollatorForSupervisedDataset(object):
                 batch['images'] = torch.stack(images)
             else:
                 batch['images'] = images
-
         return batch
 
 
@@ -1231,6 +1231,15 @@ def train(attn_implementation=None):
             for p in bbox_tower.parameters():
                 p.requires_grad = True
 
+        # def hook_fn(name, grad):
+        #     print(f"Gradient for {name} - max: {grad.max().item()}, min: {grad.min().item()}")
+
+        # for name, param in model.get_model().mm_projector.named_parameters():
+        #     param.register_hook(lambda grad, name=name: hook_fn(name, grad))
+
+        # for name, param in bbox_tower.named_parameters():
+        #     param.register_hook(lambda grad, name=name: hook_fn(name, grad))
+
         model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_projector_lr = training_args.mm_projector_lr
         model.config.bb_encoder_lr = training_args.bb_encoder_lr
@@ -1257,8 +1266,10 @@ def train(attn_implementation=None):
                     tokenizer=tokenizer,
                     args=training_args,
                     **data_module)
-    # print(trainer.optimizer)
     
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print("Trainable Params:", name)
     # print("[DEBUG] model: ", model)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

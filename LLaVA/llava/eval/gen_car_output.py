@@ -2,19 +2,20 @@ import os
 import json
 import argparse
 import copy
+import re
+import requests
+from io import BytesIO
+import random
 
-import matplotlib.pyplot as plt
+import cv2
 import torch
 from tqdm import trange
 from PIL import Image
-import requests
-from io import BytesIO
-import re
+import matplotlib.pyplot as plt
 import numpy as np
 import transformers
 from datasets import load_dataset
 from PIL import Image
-import random
 from typing import Dict
 from scipy.ndimage import zoom
 
@@ -136,7 +137,7 @@ def preprocess_additional_info(additional_data, size=336, do_resize=True, crop_s
     if do_resize:
         scaling_factor = (size / h, size / w)
         for i in range(c):
-            resized_additional_data[:, :, i] = zoom(additional_data[:, :, i], scaling_factor)
+            resized_additional_data[:, :, i] = cv2.resize(additional_data[:, :, i], (size, size), interpolation=cv2.INTER_NEAREST)
     if crop_size:
         top = (size - crop_size) // 2
         left = (size - crop_size) // 2
