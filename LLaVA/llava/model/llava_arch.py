@@ -150,43 +150,43 @@ class LlavaMetaForCausalLM(ABC):
         # images should be in shape of (B, C, H, W)
         # check if C is 3  
         assert images.shape[1] >= 3, "Image should have at least 3 channels"
+        print("images shape:", images.shape)
+        # check if the model is in training mode
+        # assert self.get_model().training, "Model should be in training mode"
+        # assert self.get_model().mm_projector.training, "MM Projector should be in training mode"
+        # assert self.get_bbox_tower().training, "BBOX Tower should be in training mode"
+
+        # check if the parameters in the model are trainable
 
         # encode RGB images
         RGB_images = images[:, :3]
+        # RGB_image_features = self.get_model().get_vision_tower()(images)
+
         RGB_image_features = self.get_model().get_vision_tower()(RGB_images)
         RGB_image_features = self.get_model().mm_projector(RGB_image_features) # (B, output_dim)
-        print("RGB_image_features:", RGB_image_features.shape)
-
+        # print("RGB_image_features:", RGB_image_features.requires_grad)
+        # print("RGB_image_features:", RGB_image_features.shape)
+        # print("Max RGB_image_features:", torch.max(RGB_image_features))
+        # print("Min RGB_image_features:", torch.min(RGB_image_features))
+        # print("mean RGB_image_features:", torch.mean(RGB_image_features))
+        # print("std RGB_image_features:", torch.std(RGB_image_features))
+        # return RGB_image_features
         # encode Bounding Box images
         if images.shape[1] > 3:
             assert self.get_model().get_bbox_tower() is not None and images.shape[1] == 3 + self.get_model().get_bbox_tower().input_channels
             bbox_images = images[:, 3:, :, :]
             bbox_image_features = self.get_model().get_bbox_tower()(bbox_images) # (B, output_dim)
-            print("BBOX_image_features:",bbox_image_features.shape)
+            # print("BBOX_image_features:", bbox_image_features.requires_grad)
+            
             image_features = torch.cat((RGB_image_features, bbox_image_features), dim=1)
         else:
             image_features = RGB_image_features
-        print(f"TOTAL_image_features:", image_features.shape)
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
         images, image_sizes=None
     ):
-        # TESTING
-        # for name, param in self.get_bbox_tower().named_parameters():
-        #     if param.grad is not None:
-        #         print(f"Gradient for {name} is flowing back")
-        #     else:
-        #         print(f"Gradient for {name} is not flowing back")
-
-        # # TESTING
-        # for name, param in self.get_model().mm_projector.named_parameters():
-        #     if param.grad is not None:
-        #         print(f"Gradient for {name} is flowing back")
-        #     else:
-        #         print(f"Gradient for {name} is not flowing back")
-
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
@@ -307,9 +307,9 @@ class LlavaMetaForCausalLM(ABC):
 
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
-
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
+
 
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
