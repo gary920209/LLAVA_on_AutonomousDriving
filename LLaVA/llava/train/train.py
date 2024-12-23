@@ -891,7 +891,9 @@ class HuggingfaceSupervisedDataset(Dataset):
             for source in sources:
                 updated_source = copy.deepcopy(source)
                 if isinstance(source['conversations'][0], dict):
+                    # finetuning
                     updated_source['conversations'] = source['conversations']
+                    # TODO: merge the general gt answer to the suggestion prompt
                 else:
                     # pretraining
                     updated_source['conversations'] = random.sample(source['conversations'], 1)[0]
