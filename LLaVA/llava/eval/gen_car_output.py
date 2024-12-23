@@ -9,7 +9,7 @@ import random
 
 import cv2
 import torch
-from tqdm import trange
+from tqdm import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
@@ -256,7 +256,7 @@ def eval_model(args):
         qs_dict[k] = prompt
 
     all_outputs = {}
-    for annotation in annotations:
+    for annotation in tqdm(annotations):
         task_type = annotation["id"].split("_")[1]
         print("task_type", task_type)
         image_file = annotation["image"]
