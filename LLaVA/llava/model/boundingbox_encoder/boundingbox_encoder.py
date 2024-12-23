@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 class CLIPBoundingBoxEncoder(nn.Module):
-    def __init__(self, input_channels, output_dim, hidden_dim=512, patch_size=24, num_layers=4, num_heads=4, image_size=336, bb_projector_type="linear"):
+    def __init__(self, input_channels, output_dim, hidden_dim=512, patch_size=24, num_layers=12, num_heads=4, image_size=336, bb_projector_type="linear"):
         """
         Mimics the CLIP encoder architecture for bounding box features, with separate handling for depth info.
 

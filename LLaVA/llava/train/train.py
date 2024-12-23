@@ -67,6 +67,7 @@ class ModelArguments:
     vision_tower: Optional[str] = field(default=None)
     mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
+    pretrain_bbox_encoder: Optional[str] = field(default=None)
     mm_projector_type: Optional[str] = field(default='linear')
     bb_projector_type: Optional[str] = field(default='linear')
     bb_input_dim: int = field(default=35)
@@ -121,6 +122,7 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_dropout: float = 0.05
     lora_weight_path: str = ""
     lora_bias: str = "none"
+    use_dora: bool = False
     mm_projector_lr: Optional[float] = None
     bb_encoder_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
@@ -891,7 +893,8 @@ class HuggingfaceSupervisedDataset(Dataset):
                 if isinstance(source['conversations'][0], dict):
                     updated_source['conversations'] = source['conversations']
                 else:
-                    updated_source['conversations'] = random.sample(source['conversations'], 1)
+                    # pretraining
+                    updated_source['conversations'] = random.sample(source['conversations'], 1)[0]
                 updated_sources.append(updated_source)
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in updated_sources]),
@@ -1145,7 +1148,9 @@ def train(attn_implementation=None):
 
     if training_args.lora_enable:
         from peft import LoraConfig, get_peft_model
+        print("Adding LoRA adapters..., using dora:", training_args.use_dora)
         lora_config = LoraConfig(
+            use_dora=training_args.use_dora,
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
             target_modules=find_all_linear_names(model),

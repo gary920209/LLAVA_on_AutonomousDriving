@@ -57,6 +57,7 @@ class LlavaMetaModel:
         mm_vision_select_layer = model_args.mm_vision_select_layer
         mm_vision_select_feature = model_args.mm_vision_select_feature
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
+        pretrain_bbox_encoder = model_args.pretrain_bbox_encoder
         mm_patch_merge_type = model_args.mm_patch_merge_type
 
         self.config.mm_vision_tower = vision_tower
@@ -96,11 +97,19 @@ class LlavaMetaModel:
                 p.requires_grad = True
 
         if pretrain_mm_mlp_adapter is not None:
+            print("loading mm_projector weights")
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+
+        if pretrain_bbox_encoder is not None:
+            print("loading bbox_tower weights")
+            bbox_tower_weights = torch.load(pretrain_bbox_encoder, map_location='cpu')
+            def get_w(weights, keyword):
+                return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
+            self.bbox_tower.load_state_dict(get_w(bbox_tower_weights, 'bbox_tower'))
 
 
 def unpad_image(tensor, original_size):
