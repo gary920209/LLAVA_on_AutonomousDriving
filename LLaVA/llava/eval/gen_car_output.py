@@ -193,7 +193,36 @@ def load_images(image_files):
         out.append(image)
     return out
 
+def preprocess_multistage_inference(sources, inference_data, raw_path):
+    def get_task_type_from_id(image_id):
+        """Extract task type from image_id (e.g., 'test_general_01' -> 'general')"""
+        parts = image_id.split('_')
+        if len(parts) >= 2:
+            return parts[1]  # 'general', 'suggestion', etc.
+        return None
 
+    def load_data_from_json(path):
+        with open(path, 'r') as f:
+            return json.load(f)
+
+    multistage_sources = copy.deepcopy(sources)
+    target_id = multistage_sources[0]['id']
+    task_type = get_task_type_from_id(target_id)
+    assert task_type in ["general", "regional", "suggestion"], "Invalid task type"
+    if task_type == 'general' or task_type == 'regional':
+        return multistage_sources
+    
+    completed_data = copy.deepcopy(inference_data)
+
+    for item in completed_data:
+        if not item:
+            continue
+        id_ = item.get("id", "").split('_')[-1]
+        if target_id.split('_')[-1] == id_ and item.get("id", "").split('_')[1] == 'general':
+            first_stage_QA = 'Here are the given knowledge of an QA pairs: Questions: ' + item['conversations'][0]['value'].split('<image>\n')[-1] + '\nAnswers: ' + item['conversations'][1]['value']
+            multistage_sources[0]['conversations'][0]['value'] = multistage_sources[0]['conversations'][0]['value'].replace('<image>\n', '<image>\n' + first_stage_QA)
+    return multistage_sources
+    
 def eval_model(args):
 
     annotations = None
@@ -256,9 +285,13 @@ def eval_model(args):
         qs_dict[k] = prompt
 
     all_outputs = {}
+    general_outputs = {}
     for annotation in tqdm(annotations):
         task_type = annotation["id"].split("_")[1]
+        if task_type == 'suggestion':
+            continue
         print("task_type", task_type)
+        # skip suggestion
         image_file = annotation["image"]
         assert os.path.exists(image_file), f"Image file {image_file} does not exist."
         image = [load_image(image_file)]
@@ -269,6 +302,7 @@ def eval_model(args):
             image_processor,
             annotation
         ).to(model.device, dtype=torch.float16)
+
         input_ids = (
             tokenizer_image_token(qs_dict[task_type], tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
             .unsqueeze(0)
@@ -290,6 +324,50 @@ def eval_model(args):
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
         all_outputs[image_file.split('/')[-1].split('.')[0]] = outputs
         print(outputs)
+        if task_type == 'general':
+            general_outputs[annotation["id"].split("_")[2]] = outputs
+
+    for annotation in tqdm(annotations):
+        task_type = annotation["id"].split("_")[1]
+        if task_type == 'suggestion':
+            first_stage_QA = 'Here are the given knowledge of an QA pairs: Questions: ' + qs_dict["general"] + '\nAnswers: ' + general_outputs[annotation["id"].split("_")[2]]
+        else:
+            continue
+        print("task_type", task_type)
+        # add region answers to suggestion
+        image_file = annotation["image"]
+        assert os.path.exists(image_file), f"Image file {image_file} does not exist."
+        image = [load_image(image_file)]
+        print("image_file:", image_file)
+        image_size = [image[0].size]
+        image_tensor = preprocess_image(
+            image,
+            image_processor,
+            annotation
+        ).to(model.device, dtype=torch.float16)
+
+        input_ids = (
+            tokenizer_image_token(first_stage_QA + qs_dict[task_type], tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+            .unsqueeze(0)
+            .cuda()
+        )
+        with torch.inference_mode():
+            output_ids = model.generate(
+                input_ids,
+                images=image_tensor,
+                image_sizes=image_size,
+                do_sample=True if args.temperature > 0 else False,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                num_beams=args.num_beams,
+                max_new_tokens=args.max_new_tokens,
+                use_cache=True,
+            )
+
+        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        all_outputs[image_file.split('/')[-1].split('.')[0]] = outputs
+        print(outputs)
+
 
     with open(args.output_file, "w") as f:
         json.dump(all_outputs, f, indent=4)
