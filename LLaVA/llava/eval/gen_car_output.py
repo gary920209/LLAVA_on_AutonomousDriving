@@ -219,7 +219,8 @@ def preprocess_multistage_inference(sources, inference_data, raw_path):
             continue
         id_ = item.get("id", "").split('_')[-1]
         if target_id.split('_')[-1] == id_ and item.get("id", "").split('_')[1] == 'general':
-            first_stage_QA = 'Here are the given knowledge of an QA pairs: Questions: ' + item['conversations'][0]['value'].split('<image>\n')[-1] + '\nAnswers: ' + item['conversations'][1]['value']
+            first_stage_QA = 'Here is the given knowledge of the image:\n\n' + item['conversations'][1]['value'] + '\n\n' + 'Now, please answer the following question based on the given knowledge.\n\n'
+            # first_stage_QA = 'Here are the given knowledge of an QA pairs: Questions: ' + item['conversations'][0]['value'].split('<image>\n')[-1] + '\nAnswers: ' + item['conversations'][1]['value']
             multistage_sources[0]['conversations'][0]['value'] = multistage_sources[0]['conversations'][0]['value'].replace('<image>\n', '<image>\n' + first_stage_QA)
     return multistage_sources
     

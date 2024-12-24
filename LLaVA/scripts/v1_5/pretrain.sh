@@ -1,12 +1,12 @@
 #!/bin/bash
 export TMPDIR=/mnt/HDD_1/walker/
 
-CUDA_VISIBLE_DEVICES=1,2 \
+CUDA_VISIBLE_DEVICES=2 \
 deepspeed llava/train/train_mem.py \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path liuhaotian/llava-v1.5-7b \
     --version v1 \
-    --data_path /mnt/HDD_1/walker/dlcv_json_files/pretrain.json \
+    --data_path /mnt/HDD_1/walker/dlcv_pretrain_data/pretrain_short.json \
     --val_data_path /mnt/HDD_1/walker/dlcv_json_files/val.json \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --mm_projector_type mlp2x_gelu \
@@ -20,7 +20,7 @@ deepspeed llava/train/train_mem.py \
     --tune_bbox_encoder True \
     --bb_encoder_lr 5e-4 \
     --bf16 True \
-    --output_dir /mnt/HDD_1/walker/dlcv_checkpoints/llava-v1.5-7b-pretrain-1223 \
+    --output_dir /mnt/HDD_1/walker/dlcv_checkpoints/llava-v1.5-7b-pretrain-1224 \
     --num_train_epochs 2 \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 4 \
