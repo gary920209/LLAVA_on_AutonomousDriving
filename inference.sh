@@ -1,6 +1,6 @@
 #!/bin/bash
 
-model_path="/mnt/HDD_1/walker/dlcv_checkpoints/llava-v1.5-7b-finetune-lora-1222"
+model_path="/mnt/HDD_1/walker/dlcv_checkpoints/llava-v1.5-7b-finetune-with-pretrain-lora-1223"
 # model_path="liuhaotian/llava-v1.5-7b"
 image_folder="/mnt/HDD_1/walker/dlcv_test_data/test_images"
 output_json="submission.json"

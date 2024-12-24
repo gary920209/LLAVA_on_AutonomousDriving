@@ -320,7 +320,43 @@ def _add_speaker_and_signal(header, source, get_conversation=True):
     conversation += BEGIN_SIGNAL
     return conversation
 
+def preprocess_multistage_training(sources: Sequence[str], train_data, raw_path):
+    # TODOS: generation -> regional & suggestions
+    def get_task_type_from_id(image_id):
+        """Extract task type from image_id (e.g., 'test_general_01' -> 'general')"""
+        parts = image_id.split('_')
+        if len(parts) >= 2:
+            return parts[1]  # 'general', 'suggestion', etc.
+        return None
 
+    def load_data_from_json(path):
+        with open(path, 'r') as f:
+            return json.load(f)
+
+    multistage_sources = copy.deepcopy(sources)
+    # print(multistage_sources)
+    target_id = multistage_sources[0]['id']
+    task_type = get_task_type_from_id(target_id)
+    assert task_type in ["general", "regional", "suggestion"], "Invalid task type"
+    if task_type == 'general' or task_type == 'regional':
+        return multistage_sources
+    
+    # completed_data = load_data_from_json(raw_path)
+    completed_data = copy.deepcopy(train_data)
+    # print('completed: ', completed_data[0])
+
+    for item in completed_data:
+        if not item:
+            continue
+        id_ = item.get("id", "").split('_')[-1]
+        if target_id.split('_')[-1] == id_ and item.get("id", "").split('_')[1] == 'general':
+            # print('find target general:', item)
+            first_stage_QA = 'Here is the given knowledge of the image:\n\n' + item['conversations'][1]['value'] + '\n\n' + 'Now, please answer the following question based on the given knowledge.\n\n'
+            # print('first stage QA: ', first_stage_QA)
+            multistage_sources[0]['conversations'][0]['value'] = multistage_sources[0]['conversations'][0]['value'].replace('<image>\n', '<image>\n' + first_stage_QA)
+            # print('replaced: ', multistage_sources[0]['conversations'][0]['value'])
+    return multistage_sources
+    
 def preprocess_multimodal(
     sources: Sequence[str],
     data_args: DataArguments
@@ -887,17 +923,20 @@ class HuggingfaceSupervisedDataset(Dataset):
             else:
                 image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             
+            mode = 'training'
             updated_sources = []
             for source in sources:
                 updated_source = copy.deepcopy(source)
                 if isinstance(source['conversations'][0], dict):
-                    # finetuning
                     updated_source['conversations'] = source['conversations']
-                    # TODO: merge the general gt answer to the suggestion prompt
                 else:
-                    # pretraining
+                    mode = 'pretraining'
                     updated_source['conversations'] = random.sample(source['conversations'], 1)[0]
                 updated_sources.append(updated_source)
+
+            # if mode == 'training':
+            #     updated_sources = preprocess_multistage_training(updated_sources, train_data=self.train_data, raw_path= '/mnt/HDD_1/walker/dlcv_json_files/train.json')
+            
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in updated_sources]),
                 self.data_args)
