@@ -111,6 +111,9 @@ class LlavaMetaModel:
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
             self.bbox_tower.load_state_dict(get_w(bbox_tower_weights, 'bbox_tower'))
 
+        for p in self.bbox_tower.parameters():
+            p.requires_grad = True
+
 
 def unpad_image(tensor, original_size):
     """

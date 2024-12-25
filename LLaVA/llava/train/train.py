@@ -71,7 +71,6 @@ class ModelArguments:
     mm_projector_type: Optional[str] = field(default='linear')
     bb_projector_type: Optional[str] = field(default='linear')
     bb_input_dim: int = field(default=35)
-    pretrain_vision_adapter: Optional[str] = field(default=None)
     mm_use_im_start_end: bool = field(default=False)
     mm_use_im_patch_token: bool = field(default=True)
     mm_patch_merge_type: Optional[str] = field(default='flat')
@@ -202,11 +201,9 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                                    output_dir: str):
     """Collects the state dict and dump to disk."""
 
-    if getattr(trainer.args, "tune_mm_mlp_adapter", False):
+    if getattr(trainer.args, "tune_bbox_encoder", False):
         # Only save Adapter
-        keys_to_match = ['mm_projector']
-        if getattr(trainer.args, "use_im_start_end", False):
-            keys_to_match.extend(['embed_tokens', 'embed_in'])
+        keys_to_match = ['bbox']
 
         weight_to_save = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
         trainer.model.config.save_pretrained(output_dir)
@@ -215,11 +212,11 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         parent_folder = os.path.dirname(output_dir)
         if trainer.args.local_rank == 0 or trainer.args.local_rank == -1:
             if current_folder.startswith('checkpoint-'):
-                mm_projector_folder = os.path.join(parent_folder, "mm_projector")
+                mm_projector_folder = os.path.join(parent_folder, "bbox_encoder")
                 os.makedirs(mm_projector_folder, exist_ok=True)
                 torch.save(weight_to_save, os.path.join(mm_projector_folder, f'{current_folder}.bin'))
             else:
-                torch.save(weight_to_save, os.path.join(output_dir, f'mm_projector.bin'))
+                torch.save(weight_to_save, os.path.join(output_dir, f'bbox_encoder.bin'))
         return
 
     if trainer.deepspeed:
@@ -1257,10 +1254,14 @@ def train(attn_implementation=None):
         model.config.tokenizer_model_max_length = tokenizer.model_max_length
 
         model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
-        if model_args.tune_mm_mlp_adapter:
-            # print("in")
+        model.config.tune_bbox_encoder = training_args.tune_bbox_encoder = model_args.tune_bbox_encoder
+
+        bbox_tower = model.get_bbox_tower()
+        bbox_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+        
+        if model_args.tune_bbox_encoder:
             model.requires_grad_(False)
-            for p in model.get_model().mm_projector.parameters():
+            for p in bbox_tower.parameters():
                 p.requires_grad = True
 
         model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
@@ -1270,12 +1271,6 @@ def train(attn_implementation=None):
 
         if training_args.bits in [4, 8]:
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
-
-        bbox_tower = model.get_bbox_tower()
-        bbox_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
-        if model_args.tune_bbox_encoder:
-            for p in bbox_tower.parameters():
-                p.requires_grad = True
 
         # def hook_fn(name, grad):
         #     print(f"Gradient for {name} - max: {grad.max().item()}, min: {grad.min().item()}")
@@ -1308,6 +1303,7 @@ def train(attn_implementation=None):
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
+    model = model.to(torch.float32)
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
