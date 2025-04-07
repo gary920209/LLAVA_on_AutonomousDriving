@@ -1,7 +1,7 @@
 #!/bin/bash
 
-model_path="/home/twszmxa453/CVPR2025/checkpoints/llava-v1.5-7b-finetune-with-pretrain-lora-1223"
-image_folder="/home/twszmxa453/CVPR2025/dlcv_test_data/test_images"
+model_path="checkpoints/llava-v1.5-7b-finetune-with-pretrain-lora-1223"
+image_folder="dlcv_test_data/test_images"
 output_json=$2
 annotation_file=$1
 
